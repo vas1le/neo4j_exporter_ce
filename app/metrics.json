@@ -3,7 +3,7 @@
     {
       "name": "neo4j_exporter_ce_transactions_active_total",
       "help": "Total number of active transactions in the Neo4j database",
-      "query": "SHOW TRANSACTIONS YIELD transactionId WITH count(transactionId) AS activeCount RETURN activeCount",
+      "query": "SHOW TRANSACTIONS YIELD transactionId RETURN count(transactionId) AS activeCount",
       "value_field": "activeCount",
       "value": "",
       "labels": [],
