@@ -12,7 +12,7 @@
     {
       "name": "neo4j_exporter_ce_transaction_elapsed_seconds",
       "help": "Elapsed time in seconds of each active Neo4j transaction",
-      "query": "SHOW TRANSACTIONS YIELD transactionId, username, elapsedTime.seconds AS elapsedSeconds RETURN transactionId, username, elapsedSeconds",
+      "query": "SHOW TRANSACTIONS YIELD transactionId, username, elapsedTime RETURN transactionId, username, toFloat(elapsedTime.seconds) + (elapsedTime.nanoseconds / 1e9) AS elapsedSeconds",
       "value_field": "elapsedSeconds",
       "value": "",
       "labels": ["transactionId", "username"],
