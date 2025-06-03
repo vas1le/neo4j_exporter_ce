@@ -20,11 +20,3 @@
     }
   ]
 }
-
-
-
-
-
-CALL db.stats.retrieve('QUERIES') YIELD data
-             WHERE data.query = "SHOW TRANSACTIONS YIELD transactionId RETURN count(transactionId) AS activeCount"
-             RETURN data.invocationSummary.executionTimeInUs.avg / 1000.0 AS specificQueryAvgMs;
