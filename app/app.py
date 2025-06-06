@@ -1,273 +1,309 @@
+#!/usr/bin/env python3
+"""
+neo4j_exporter_ce.py – Prometheus exporter implemented with FastAPI.
+
+CLI flags always override environment variables.
+
+Example:
+
+    python neo4j_exporter_fastapi.py \
+        --neo4j-uri bolt://db:7687 \
+        --neo4j-user neo4j \
+        --neo4j-password secret \
+        --port 9100 \
+        --debug
+"""
+
+from __future__ import annotations
+
+import argparse
 import json
 import os
+from typing import Any, Dict, List
 
-from flask import Flask, Response, request
-from neo4j import GraphDatabase
+import fastapi
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from neo4j import Driver, GraphDatabase
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 from rich.console import Console
+from starlette.concurrency import run_in_threadpool
 
-# ------------------------------------------------------------------------------
-# Workflow:
-# 1. Initialize Rich console for colored output.
-# 2. Read environment variables (Neo4j URI, credentials, debug flag, port).
-#    - If any variables are missing or malformed, fall back to sensible defaults.
-# 3. Load metric definitions from metrics.json.
-#    - If the file is missing or invalid, run without custom metrics.
-# 4. Define Flask hooks:
-#    a. before_request: log every incoming HTTP request.
-#    b. catch_all: respond to any path other than /metrics.
-# 5. On /metrics request:
-#    a. Create a fresh Prometheus CollectorRegistry.
-#    b. Attempt to connect to Neo4j and verify connectivity.
-#       - If connection fails, set a "connection_status=0" gauge and return HTTP 500.
-#       - If connection succeeds, set "connection_status=1".
-#    c. For each metric definition:
-#       i.   Validate required fields ("name", "help", "query", and either "value_field" or "value").
-#       ii.  Extract optional "labels" list and "query_params" dict.
-#       iii. Execute the Cypher query with parameters.
-#       iv.  Convert each returned record into a Prometheus gauge sample.
-#    d. Close the Neo4j driver and emit all collected metrics as plaintext.
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# 1. Command-line flags (highest priority)                                    #
+# --------------------------------------------------------------------------- #
 
-# Initialize Rich console for formatted printing
+
+def _parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Prometheus exporter that scrapes metrics from Neo4j."
+    )
+    parser.add_argument("--neo4j-uri", help="Neo4j bolt URI")
+    parser.add_argument("--neo4j-user", help="Neo4j username")
+    parser.add_argument("--neo4j-password", help="Neo4j password")
+    parser.add_argument("--port", type=int, help="Exporter listen port")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logs")
+    return parser.parse_args()  # abort on unknown flags
+
+
+_cli = _parse_cli_args()
+
+# --------------------------------------------------------------------------- #
+# 2. Configuration (CLI ▶ ENV ▶ default)                                      #
+# --------------------------------------------------------------------------- #
+
 console = Console()
 
-# ----------------------------------------
-# 2. Load environment variables with defaults
-# ----------------------------------------
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
-
-_debug_env = os.getenv("NEO4J_EXPORTER_DEBUG", "true")
-DEBUG = _debug_env.lower() in ("true", "1", "yes")
-
-_port_env_value = os.getenv("NEO4J_EXPORTER_PORT", "8000")
-try:
-    PORT = int(_port_env_value)
-except ValueError:
-    console.print(
-        f"[ERROR] NEO4J_EXPORTER_PORT is invalid: '{_port_env_value}'. Defaulting to 8000.",
-        style="red",
-    )
-    PORT = 8000
+NEO4J_URI: str = _cli.neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER: str = _cli.neo4j_user or os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD: str = _cli.neo4j_password or os.getenv("NEO4J_PASSWORD", "password")
 
 
-def debug_print(msg):
-    """Print debug messages if DEBUG is true."""
+def _resolve_port() -> int:
+    if _cli.port is not None:  # argparse already ensured int
+        return _cli.port
+    port_str = os.getenv("NEO4J_EXPORTER_PORT", "8000")
+    try:
+        return int(port_str)
+    except ValueError:
+        console.print(
+            f"[WARN] Invalid NEO4J_EXPORTER_PORT='{port_str}'. Defaulting to 8000.",
+            style="yellow",
+        )
+        return 8000
+
+
+PORT: int = _resolve_port()
+
+DEBUG: bool = (
+    _cli.debug
+    if _cli.debug is not None
+    else os.getenv("NEO4J_EXPORTER_DEBUG", "false").lower() in {"1", "true", "yes"}
+)
+
+# --------------------------------------------------------------------------- #
+# 3. Utilities                                                                #
+# --------------------------------------------------------------------------- #
+
+
+def debug(msg: str) -> None:
     if DEBUG:
         console.print(f"[DEBUG] {msg}", style="dim")
 
 
-# ----------------------------------------
-# 3. Load metric definitions from metrics.json
-# ----------------------------------------
-CONFIG = {"metrics": []}
+# --------------------------------------------------------------------------- #
+# 4. Load metric definitions (optional)                                       #
+# --------------------------------------------------------------------------- #
+
+CONFIG: Dict[str, Any] = {"metrics": []}
 try:
-    with open("metrics.json", "r") as f:
-        CONFIG = json.load(f)
-    if "metrics" not in CONFIG or not isinstance(CONFIG["metrics"], list):
-        console.print(
-            "[ERROR] 'metrics' key missing or not a list in metrics.json. No metrics loaded.",
-            style="bold red",
-        )
-        CONFIG["metrics"] = []
+    with open("metrics.json", "r", encoding="utf-8") as fh:
+        CONFIG = json.load(fh)
+    if not isinstance(CONFIG.get("metrics"), list):
+        raise ValueError("'metrics' key must be a list")
 except FileNotFoundError:
     console.print(
-        "[ERROR] metrics.json not found. Exporter will run without custom metrics.",
-        style="bold red",
+        "[WARN] metrics.json not found – exporter will expose only built-in metrics.",
+        style="yellow",
     )
-except json.JSONDecodeError:
+except (json.JSONDecodeError, ValueError) as err:
     console.print(
-        "[ERROR] metrics.json contains invalid JSON. No metrics loaded.",
-        style="bold red",
+        f"[WARN] metrics.json is invalid ({err}) – exporter will expose only built-in metrics.",
+        style="yellow",
     )
+    CONFIG["metrics"] = []
 
-# ----------------------------------------
-# 4. Initialize Flask app and hooks
-# ----------------------------------------
-app = Flask(__name__)
+# --------------------------------------------------------------------------- #
+# 5. Neo4j driver (single instance, thread-safe sessions per request)         #
+# --------------------------------------------------------------------------- #
 
-
-@app.before_request
-def log_request():
-    """
-    Log every incoming HTTP request.
-    This runs before any endpoint handler.
-    """
+try:
+    driver: Driver | None = GraphDatabase.driver(
+        NEO4J_URI,
+        auth=(NEO4J_USER, NEO4J_PASSWORD),
+    )
+    driver.verify_connectivity()
+    debug(f"Connected to Neo4j at {NEO4J_URI} as '{NEO4J_USER}'")
+except Exception as exc:
     console.print(
-        f"[INFO] HTTP {request.method} request to {request.path}", style="bold green"
+        f"[ERROR] Failed to initialise Neo4j driver: {exc!r}", style="bold red"
     )
+    driver = None  # health endpoint will report Unhealthy
+
+# --------------------------------------------------------------------------- #
+# 6. FastAPI application                                                      #
+# --------------------------------------------------------------------------- #
+
+app = fastapi.FastAPI()
 
 
-@app.route("/", defaults={"path": ""})
-@app.route("/<path:path>")
-def catch_all(path):
-    """
-    Handle any route other than /metrics.
-    Respond with a simple message so the server doesn't return 404.
-    """
-    return "This exporter only serves /metrics\n", 200
+@app.on_event("shutdown")
+def _close_driver() -> None:
+    if driver:
+        driver.close()
+        debug("Neo4j driver closed on shutdown")
 
 
-@app.route("/metrics")
-def metrics():
-    """
-    Serve Prometheus metrics on /metrics.
-    """
+@app.middleware("http")
+async def log_requests(request: fastapi.Request, call_next):
+    console.print(
+        f"[INFO] HTTP {request.method} {request.url.path}", style="bold green"
+    )
+    return await call_next(request)
+
+
+# --------------------------------------------------------------------------- #
+# 7. /metrics                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    """Collect metrics from Neo4j and expose them to Prometheus."""
     registry = CollectorRegistry()
-    driver = None  # Ensure driver is defined for cleanup
 
+    conn_gauge = Gauge(
+        "neo4j_exporter_connection_status",
+        "Connection status to Neo4j (1 = OK, 0 = Error)",
+        registry=registry,
+    )
+    scrape_error_gauge = Gauge(
+        "neo4j_exporter_metric_errors",
+        "Number of metric processing errors in this scrape",
+        registry=registry,
+    )
+    scrape_errors = 0
+
+    # Connectivity check
     try:
-        # a. Connect to Neo4j and verify connectivity
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        if driver is None:
+            raise RuntimeError("Driver not initialised")
         driver.verify_connectivity()
-        debug_print(f"Connected to Neo4j at {NEO4J_URI} as '{NEO4J_USER}'.")
-
-        # b. Expose a gauge indicating connection success
-        connection_gauge = Gauge(
-            "neo4j_exporter_connection_status",
-            "Exporter connection state to Neo4j (1=ok, 0=failed)",
-            registry=registry,
+        conn_gauge.set(1)
+    except Exception as fatal:
+        conn_gauge.set(0)
+        debug(f"Connectivity check failed: {fatal!r}")
+        return Response(
+            content=generate_latest(registry),
+            media_type="text/plain",
+            status_code=500,
         )
-        connection_gauge.set(1)
 
-        # c. Iterate over each metric definition
-        with driver.session() as session:
-            for idx, metric_cfg in enumerate(CONFIG.get("metrics", [])):
-                # i. Validate required keys
+    # Collect configured metrics
+    with driver.session() as session:
+        for idx, m in enumerate(CONFIG.get("metrics", [])):
+            metric_name_for_log = m.get("name", f"Unnamed metric #{idx}")
+            try:
+                name = m["name"]
+                help_text = m["help"]
+                query = m["query"]
+                value_field = m.get("value_field", m.get("value"))
+                if value_field is None:
+                    raise KeyError("value_field/value missing")
+                labels: List[str] = m.get("labels", [])
+                params: Dict[str, Any] = m.get("query_params", {})
+                if not isinstance(params, dict):
+                    debug(f"Metric '{name}' has non-dict 'query_params'. Ignoring.")
+                    params = {}
+            except KeyError as miss:
+                debug(
+                    f"Metric '{metric_name_for_log}' skipped – bad definition: {miss}"
+                )
+                scrape_errors += 1
+                continue
+
+            gauge = Gauge(name, help_text, labelnames=labels, registry=registry)
+            debug(f"Running '{name}' – params={params or '∅'}")
+            try:
+                rows = list(session.run(query, parameters=params))
+            except Exception as qerr:
+                debug(f"Query failed for '{name}': {qerr!r}")
+                scrape_errors += 1
+                continue
+
+            if not rows:
+                debug(f"'{name}' returned zero rows")
+                continue
+
+            if labels:
+                for row_idx, row in enumerate(rows):
+                    try:
+                        gauge.labels(*[str(row[l]) for l in labels]).set(
+                            float(row[value_field])
+                        )
+                    except (KeyError, TypeError, ValueError) as row_conv_err:
+                        debug(
+                            f"Skipping row #{row_idx} for metric '{name}' "
+                            f"due to conversion error: {row_conv_err!r}"
+                        )
+                        scrape_errors += 1
+            else:
                 try:
-                    name = metric_cfg["name"]
-                    help_text = metric_cfg["help"]
-                    query = metric_cfg["query"]
-                    # Accept either "value_field" or "value"
-                    value_field = metric_cfg.get("value_field", metric_cfg.get("value"))
-                    if value_field is None:
-                        raise KeyError("No 'value_field' or 'value' provided")
-                    labels = metric_cfg.get("labels", [])
-                    # Optional parameters for the Cypher query
-                    query_params = metric_cfg.get("query_params", {})
-                    if not isinstance(query_params, dict):
-                        debug_print(
-                            f"Metric #{idx} ('{name}') 'query_params' is not a dict. Ignoring parameters: {query_params}"
-                        )
-                        query_params = {}
-                except KeyError as e:
-                    debug_print(
-                        f"Metric #{idx} missing required key {e}. Skipping: {metric_cfg}"
+                    gauge.set(float(rows[0][value_field]))
+                except (KeyError, TypeError, ValueError) as conv_err:
+                    debug(
+                        f"Skipping metric '{name}' due to conversion error: {conv_err!r}"
                     )
-                    continue
+                    scrape_errors += 1
 
-                try:
-                    # ii. Create or register the gauge (with or without labels)
-                    if labels:
-                        gauge = Gauge(
-                            name, help_text, labelnames=labels, registry=registry
-                        )
-                    else:
-                        gauge = Gauge(name, help_text, registry=registry)
+    scrape_error_gauge.set(scrape_errors)
 
-                    # iii. Run the Cypher query with any provided parameters
-                    debug_print(
-                        f"Running query for '{name}' with params: {query_params or 'None'}"
-                    )
-                    result = session.run(query, parameters=query_params)
-                    rows = list(result)  # Fetch all records at once
+    return Response(
+        content=generate_latest(registry),
+        media_type="text/plain",
+        status_code=200,
+    )
 
-                    if not rows:
-                        debug_print(
-                            f"No rows returned for metric '{name}'. Query: {query}, Params: {query_params}"
-                        )
-                        continue
 
-                    # iv. Convert records into gauge samples
-                    if labels:
-                        for row_idx, record in enumerate(rows):
-                            try:
-                                label_values = [str(record[k]) for k in labels]
-                                raw = record[value_field]
-                                val = float(raw)
-                                gauge.labels(*label_values).set(val)
-                            except KeyError as e:
-                                debug_print(
-                                    f"Record #{row_idx} for metric '{name}' missing key {e}. "
-                                    f"Record: {dict(record)}. Labels: {labels}, ValueField: '{value_field}'. Params: {query_params}"
-                                )
-                            except (TypeError, ValueError) as e:
-                                debug_print(
-                                    f"Cannot convert value for record #{row_idx} in metric '{name}': raw='{raw}', error={e!r}. "
-                                    f"Record: {dict(record)}. Params: {query_params}"
-                                )
-                            except Exception as err:
-                                debug_print(
-                                    f"Unexpected error processing record #{row_idx} for metric '{name}': {err!r}. "
-                                    f"Record: {dict(record)}. Params: {query_params}"
-                                )
-                    else:
-                        if len(rows) > 1:
-                            debug_print(
-                                f"Unlabeled metric '{name}' returned {len(rows)} rows. Using only the first. Params: {query_params}"
-                            )
-                        record = rows[0]
-                        try:
-                            raw = record[value_field]
-                            val = float(raw)
-                            gauge.set(val)
-                            debug_print(
-                                f"Metric '{name}' set to {val}. Params: {query_params}"
-                            )
-                        except KeyError as e:
-                            debug_print(
-                                f"Missing key for value in '{name}': {e!r}. Expected '{value_field}'. "
-                                f"Record: {dict(record)}. Params: {query_params}"
-                            )
-                        except (TypeError, ValueError) as e:
-                            debug_print(
-                                f"Cannot convert metric '{name}' raw='{raw}': {e!r}. Record: {dict(record)}. Params: {query_params}"
-                            )
-                        except Exception as err:
-                            debug_print(
-                                f"Unexpected error processing '{name}': {err!r}. Record: {dict(record)}. Params: {query_params}"
-                            )
+# --------------------------------------------------------------------------- #
+# 8. /healthz                                                                 #
+# --------------------------------------------------------------------------- #
 
-                except Exception as e:
-                    metric_name = metric_cfg.get("name", f"# {idx}")
-                    query_text = metric_cfg.get("query", "unknown")
-                    params_text = metric_cfg.get("query_params", {})
-                    debug_print(
-                        f"Failed to process metric '{metric_name}'. Error: {e!r}. "
-                        f"Query: {query_text}. Params: {params_text}"
-                    )
-                    continue
+router = fastapi.APIRouter()
 
-    except Exception as e:
-        # If driver creation or connectivity check fails
-        debug_print(f"Critical failure connecting to Neo4j: {e!r}")
-        connection_gauge_fail = Gauge(
-            "neo4j_exporter_connection_status",
-            "Exporter connection state to Neo4j (1=ok, 0=failed)",
-            registry=registry,
-        )
-        connection_gauge_fail.set(0)
-        return Response(generate_latest(registry), mimetype="text/plain", status=500)
 
-    finally:
-        if driver:
-            driver.close()
-            debug_print("Neo4j driver closed.")
+@router.get("/healthz")
+async def healthcheck() -> JSONResponse:
+    """Return 200 if the exporter can reach Neo4j."""
+    try:
+        if driver is None:
+            raise RuntimeError("Driver not initialised")
+        await run_in_threadpool(driver.verify_connectivity)
+        return JSONResponse(content={"status": "Healthy"})
+    except Exception as exc:
+        debug(f"Health check failed: {exc!r}")
+        return JSONResponse(content={"status": "Unhealthy"}, status_code=500)
 
-    # Return all collected metrics as plain text
-    return Response(generate_latest(registry), mimetype="text/plain")
 
+app.include_router(router)
+
+# --------------------------------------------------------------------------- #
+# 9. Catch-all                                                                #
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/{_path:path}")
+def everything_else() -> PlainTextResponse:
+    return PlainTextResponse(
+        "This exporter only serves /metrics and /healthz\n", status_code=200
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 10. Script entry-point (optional)                                           #
+# --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
+    import uvicorn
+
     if DEBUG:
+        console.print(f"[INFO] Starting FastAPI on 0.0.0.0:{PORT}", style="bold blue")
         console.print(
-            f"[INFO] Starting Flask server on 0.0.0.0:{PORT}", style="bold blue"
+            f"[INFO] NEO4J_URI='{NEO4J_URI}', USER='{NEO4J_USER}'", style="bold blue"
         )
-        console.print(
-            f"[INFO] Using NEO4J_URI='{NEO4J_URI}', NEO4J_USER='{NEO4J_USER}'",
-            style="bold blue",
-        )
-        console.print("[INFO] Debug mode is ON.", style="bold blue")
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+
+    uvicorn.run(
+        "neo4j_exporter_fastapi:app",
+        host="0.0.0.0",
+        port=PORT,
+        log_level="debug" if DEBUG else "info",
+    )

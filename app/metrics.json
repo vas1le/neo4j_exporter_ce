@@ -11,11 +11,199 @@
     },
     {
       "name": "neo4j_exporter_ce_transaction_elapsed_seconds",
-      "help": "Elapsed time in seconds of each active Neo4j transaction",
+      "help": "Elapsed wall-clock time, in seconds, since start of each active transaction",
       "query": "SHOW TRANSACTIONS YIELD transactionId, username, elapsedTime RETURN transactionId, username, toFloat(elapsedTime.seconds) + (elapsedTime.nanoseconds / 1e9) AS elapsedSeconds",
       "value_field": "elapsedSeconds",
       "value": "",
       "labels": ["transactionId", "username"],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_avg_exec_time_ms_active_transactions_query",
+      "help": "Average execution time, in ms, of the SHOW TRANSACTIONS … count query used for *_transactions_active_total",
+      "query": "CALL db.stats.retrieve('QUERIES') YIELD data WHERE data.query = 'SHOW TRANSACTIONS YIELD transactionId RETURN count(transactionId) AS activeCount' RETURN data.invocationSummary.executionTimeInUs.avg / 1000.0 AS avgExecTimeMs",
+      "value_field": "avgExecTimeMs",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_ids_nodes_total",
+      "help": "Total number of node IDs currently in use",
+      "query": "CALL apoc.monitor.ids() YIELD nodeIds RETURN nodeIds AS nodesInUse",
+      "value_field": "nodesInUse",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_ids_relationships_total",
+      "help": "Total number of relationship IDs currently in use",
+      "query": "CALL apoc.monitor.ids() YIELD relIds RETURN relIds AS relsInUse",
+      "value_field": "relsInUse",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_ids_properties_total",
+      "help": "Total number of property IDs currently in use",
+      "query": "CALL apoc.monitor.ids() YIELD propIds RETURN propIds AS propsInUse",
+      "value_field": "propsInUse",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_ids_reltypes_total",
+      "help": "Total number of relationship-type IDs currently in use",
+      "query": "CALL apoc.monitor.ids() YIELD relTypeIds RETURN relTypeIds AS relTypeInUse",
+      "value_field": "relTypeInUse",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_logical_log_bytes",
+      "help": "Logical log size of the database (bytes)",
+      "query": "CALL apoc.monitor.store() YIELD logSize RETURN logSize AS bytes",
+      "value_field": "bytes",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_string_bytes",
+      "help": "String store size (bytes)",
+      "query": "CALL apoc.monitor.store() YIELD stringStoreSize RETURN stringStoreSize AS bytes",
+      "value_field": "bytes",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_array_bytes",
+      "help": "Array store size (bytes)",
+      "query": "CALL apoc.monitor.store() YIELD arrayStoreSize RETURN arrayStoreSize AS bytes",
+      "value_field": "bytes",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_relationship_bytes",
+      "help": "Relationship store size (bytes)",
+      "query": "CALL apoc.monitor.store() YIELD relStoreSize RETURN relStoreSize AS bytes",
+      "value_field": "bytes",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_property_bytes",
+      "help": "Property store size (bytes)",
+      "query": "CALL apoc.monitor.store() YIELD propStoreSize RETURN propStoreSize AS bytes",
+      "value_field": "bytes",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_node_bytes",
+      "help": "Node store size (bytes)",
+      "query": "CALL apoc.monitor.store() YIELD nodeStoreSize RETURN nodeStoreSize AS bytes",
+      "value_field": "bytes",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_total_bytes",
+      "help": "Total on-disk store size (bytes)",
+      "query": "CALL apoc.monitor.store() YIELD totalStoreSize RETURN totalStoreSize AS bytes",
+      "value_field": "bytes",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_tx_rolled_back_total",
+      "help": "Total number of rolled-back transactions since startup",
+      "query": "CALL apoc.monitor.tx() YIELD rolledBackTx RETURN rolledBackTx AS count",
+      "value_field": "count",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_tx_peak_concurrent",
+      "help": "Peak number of concurrent transactions since startup",
+      "query": "CALL apoc.monitor.tx() YIELD peakTx RETURN peakTx AS peak",
+      "value_field": "peak",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_tx_last_committed_id",
+      "help": "ID of the last committed transaction",
+      "query": "CALL apoc.monitor.tx() YIELD lastTxId RETURN lastTxId AS id",
+      "value_field": "id",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_tx_current_open",
+      "help": "Current number of open transactions",
+      "query": "CALL apoc.monitor.tx() YIELD currentOpenedTx RETURN currentOpenedTx AS open",
+      "value_field": "open",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_tx_opened_total",
+      "help": "Total number of transactions ever opened",
+      "query": "CALL apoc.monitor.tx() YIELD totalOpenedTx RETURN totalOpenedTx AS totalOpened",
+      "value_field": "totalOpened",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_tx_committed_total",
+      "help": "Total number of committed transactions",
+      "query": "CALL apoc.monitor.tx() YIELD totalTx RETURN totalTx AS totalCommitted",
+      "value_field": "totalCommitted",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_free_bytes",
+      "help": "Free space (bytes) on the filesystem where Neo4j home resides",
+      "query": "CALL apoc.metrics.storage('server.directories.neo4j_home') YIELD usableSpaceBytes RETURN usableSpaceBytes AS freeBytes",
+      "value_field": "freeBytes",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_free_gigabytes",
+      "help": "Free space (GB) on the filesystem where Neo4j home resides",
+      "query": "CALL apoc.metrics.storage('server.directories.neo4j_home') YIELD usableSpaceBytes RETURN usableSpaceBytes / 1024.0 / 1024 / 1024 AS freeGB",
+      "value_field": "freeGB",
+      "value": "",
+      "labels": [],
+      "query_params": {}
+    },
+    {
+      "name": "neo4j_exporter_ce_store_used_percent",
+      "help": "Percentage of that filesystem currently in use by any data (100 – percentFree)",
+      "query": "CALL apoc.metrics.storage('server.directories.neo4j_home') YIELD percentFree RETURN (100 - percentFree) AS percentUsed",
+      "value_field": "percentUsed",
+      "value": "",
+      "labels": [],
       "query_params": {}
     }
   ]
