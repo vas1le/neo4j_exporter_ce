@@ -302,7 +302,7 @@ if __name__ == "__main__":
         )
 
     uvicorn.run(
-        "neo4j_exporter_fastapi:app",
+        "app:app",
         host="0.0.0.0",
         port=PORT,
         log_level="debug" if DEBUG else "info",
